@@ -21,6 +21,7 @@ import           Control.Exception.Safe                   (SomeException,
 import           Control.Monad.Extra                      (concatMapM, unless,
                                                            when)
 import qualified Data.Aeson.Encode.Pretty                 as A
+import           Data.Coerce                              (coerce)
 import           Data.Default                             (Default (def))
 import           Data.Foldable                            (traverse_)
 import           Data.Hashable                            (hashed)
@@ -63,7 +64,6 @@ import           Development.IDE.Core.Shake               (IdeState (shakeExtras
                                                            shakeSessionInit,
                                                            uses)
 import qualified Development.IDE.Core.Shake               as Shake
-import           Development.IDE.Core.Tracing             (measureMemory)
 import           Development.IDE.Graph                    (action)
 import           Development.IDE.LSP.LanguageServer       (runLanguageServer,
                                                            setupLSP)
@@ -92,7 +92,8 @@ import           Development.IDE.Types.Logger             (Logger,
                                                            Recorder,
                                                            WithPriority,
                                                            cmapWithPrio,
-                                                           logWith, vsep, (<+>))
+                                                           logWith, nest, vsep,
+                                                           (<+>))
 import           Development.IDE.Types.Monitoring         (Monitoring)
 import           Development.IDE.Types.Options            (IdeGhcSession,
                                                            IdeOptions (optCheckParents, optCheckProject, optReportProgress, optRunSubset),
@@ -122,7 +123,7 @@ import           Ide.Types                                (IdeCommand (IdeComman
                                                            IdePlugins,
                                                            PluginDescriptor (PluginDescriptor, pluginCli),
                                                            PluginId (PluginId),
-                                                           ipMap)
+                                                           ipMap, pluginId)
 import qualified Language.LSP.Server                      as LSP
 import qualified "list-t" ListT
 import           Numeric.Natural                          (Natural)
@@ -142,11 +143,10 @@ import           System.IO                                (BufferMode (LineBuffe
 import           System.Random                            (newStdGen)
 import           System.Time.Extra                        (Seconds, offsetTime,
                                                            showDuration)
-import           Text.Printf                              (printf)
 
 data Log
   = LogHeapStats !HeapStats.Log
-  | LogLspStart
+  | LogLspStart [PluginId]
   | LogLspStartDuration !Seconds
   | LogShouldRunSubset !Bool
   | LogOnlyPartialGhc92Support
@@ -163,10 +163,12 @@ data Log
 instance Pretty Log where
   pretty = \case
     LogHeapStats log -> pretty log
-    LogLspStart ->
-      vsep
-        [ "Staring LSP server..."
-        , "If you are seeing this in a terminal, you probably should have run WITHOUT the --lsp option!"]
+    LogLspStart pluginIds ->
+      nest 2 $ vsep
+        [ "Starting LSP server..."
+        , "If you are seeing this in a terminal, you probably should have run WITHOUT the --lsp option!"
+        , "PluginIds:" <+> pretty (coerce @_ @[T.Text] pluginIds)
+        ]
     LogLspStartDuration duration ->
       "Started LSP server in" <+> pretty (showDuration duration)
     LogShouldRunSubset shouldRunSubset ->
@@ -224,13 +226,12 @@ commandP plugins =
 
     pluginCommands = mconcat
         [ command (T.unpack pId) (Custom <$> p)
-        | (PluginId pId, PluginDescriptor{pluginCli = Just p}) <- ipMap plugins
+        | PluginDescriptor{pluginCli = Just p, pluginId = PluginId pId} <- ipMap plugins
         ]
 
 
 data Arguments = Arguments
     { argsProjectRoot           :: Maybe FilePath
-    , argsOTMemoryProfiling     :: Bool
     , argCommand                :: Command
     , argsLogger                :: IO Logger
     , argsRules                 :: Rules ()
@@ -251,7 +252,6 @@ data Arguments = Arguments
 defaultArguments :: Recorder (WithPriority Log) -> Logger -> Arguments
 defaultArguments recorder logger = Arguments
         { argsProjectRoot = Nothing
-        , argsOTMemoryProfiling = False
         , argCommand = LSP
         , argsLogger = pure logger
         , argsRules = mainRule (cmapWithPrio LogRules recorder) def >> action kick
@@ -336,7 +336,7 @@ defaultMain recorder Arguments{..} = withHeapStats (cmapWithPrio LogHeapStats re
             LT.putStrLn $ decodeUtf8 $ A.encodePretty $ pluginsToDefaultConfig argsHlsPlugins
         LSP -> withNumCapabilities (maybe (numProcessors `div` 2) fromIntegral argsThreads) $ do
             t <- offsetTime
-            log Info LogLspStart
+            log Info $ LogLspStart (pluginId <$> ipMap argsHlsPlugins)
 
             let getIdeState :: LSP.LanguageContextEnv Config -> Maybe FilePath -> WithHieDb -> IndexQueue -> IO IdeState
                 getIdeState env rootPath withHieDb hieChan = do
@@ -374,6 +374,7 @@ defaultMain recorder Arguments{..} = withHeapStats (cmapWithPrio LogHeapStats re
                   initialise
                       (cmapWithPrio LogService recorder)
                       argsDefaultHlsConfig
+                      argsHlsPlugins
                       rules
                       (Just env)
                       logger
@@ -418,7 +419,7 @@ defaultMain recorder Arguments{..} = withHeapStats (cmapWithPrio LogHeapStats re
                         , optCheckProject = pure False
                         , optModifyDynFlags = optModifyDynFlags def_options <> pluginModifyDynflags plugins
                         }
-            ide <- initialise (cmapWithPrio LogService recorder) argsDefaultHlsConfig rules Nothing logger debouncer options hiedb hieChan mempty
+            ide <- initialise (cmapWithPrio LogService recorder) argsDefaultHlsConfig argsHlsPlugins rules Nothing logger debouncer options hiedb hieChan mempty
             shakeSessionInit (cmapWithPrio LogShake recorder) ide
             registerIdeConfiguration (shakeExtras ide) $ IdeConfiguration mempty (hashed Nothing)
 
@@ -433,21 +434,6 @@ defaultMain recorder Arguments{..} = withHeapStats (cmapWithPrio LogHeapStats re
 
             let nfiles xs = let n = length xs in if n == 1 then "1 file" else show n ++ " files"
             putStrLn $ "\nCompleted (" ++ nfiles worked ++ " worked, " ++ nfiles failed ++ " failed)"
-
-            when argsOTMemoryProfiling $ do
-                let values = state $ shakeExtras ide
-                let consoleObserver Nothing = return $ \size -> printf "Total: %.2fMB\n" (fromIntegral @Int @Double size / 1e6)
-                    consoleObserver (Just k) = return $ \size -> printf "  - %s: %.2fKB\n" (show k) (fromIntegral @Int @Double size / 1e3)
-
-                stateContents <- atomically $ ListT.toList $ STM.listT values
-                printf "# Shake value store contents(%d):\n" (length stateContents)
-                let keys =
-                        nub $
-                            typeOf GhcSession :
-                            typeOf GhcSessionDeps :
-                            [kty | (fromKeyType -> Just (kty,_), _) <- stateContents, kty /= typeOf GhcSessionIO] ++
-                            [typeOf GhcSessionIO]
-                measureMemory logger [keys] consoleObserver values
 
             unless (null failed) (exitWith $ ExitFailure (length failed))
         Db opts cmd -> do
@@ -471,7 +457,7 @@ defaultMain recorder Arguments{..} = withHeapStats (cmapWithPrio LogHeapStats re
                     , optCheckProject = pure False
                     , optModifyDynFlags = optModifyDynFlags def_options <> pluginModifyDynflags plugins
                     }
-            ide <- initialise (cmapWithPrio LogService recorder) argsDefaultHlsConfig rules Nothing logger debouncer options hiedb hieChan mempty
+            ide <- initialise (cmapWithPrio LogService recorder) argsDefaultHlsConfig argsHlsPlugins rules Nothing logger debouncer options hiedb hieChan mempty
             shakeSessionInit (cmapWithPrio LogShake recorder) ide
             registerIdeConfiguration (shakeExtras ide) $ IdeConfiguration mempty (hashed Nothing)
             c ide

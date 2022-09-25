@@ -1,6 +1,7 @@
 -- Copyright (c) 2019 The DAML Authors. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+{-# LANGUAGE CPP                       #-}
 {-# LANGUAGE ConstraintKinds           #-}
 {-# LANGUAGE DerivingStrategies        #-}
 {-# LANGUAGE DuplicateRecordFields     #-}
@@ -129,8 +130,10 @@ import           Development.IDE.GHC.Compat             (NameCache,
                                                          NameCacheUpdater (..),
                                                          initNameCache,
                                                          knownKeyNames,
-                                                         mkSplitUniqSupply,
-                                                         upNameCache)
+                                                         mkSplitUniqSupply)
+#if !MIN_VERSION_ghc(9,3,0)
+import           Development.IDE.GHC.Compat             (upNameCache)
+#endif
 import           Development.IDE.GHC.Orphans            ()
 import           Development.IDE.Graph                  hiding (ShakeValue)
 import qualified Development.IDE.Graph                  as Shake
@@ -158,7 +161,7 @@ import           GHC.Stack                              (HasCallStack)
 import           HieDb.Types
 import           Ide.Plugin.Config
 import qualified Ide.PluginUtils                        as HLS
-import           Ide.Types                              (PluginId)
+import           Ide.Types                              (IdePlugins, PluginId)
 import           Language.LSP.Diagnostics
 import qualified Language.LSP.Server                    as LSP
 import           Language.LSP.Types
@@ -239,6 +242,7 @@ data ShakeExtras = ShakeExtras
      lspEnv :: Maybe (LSP.LanguageContextEnv Config)
     ,debouncer :: Debouncer NormalizedUri
     ,logger :: Logger
+    ,idePlugins :: IdePlugins IdeState
     ,globals :: TVar (HMap.HashMap TypeRep Dynamic)
       -- ^ Registry of global state used by rules.
       -- Small and immutable after startup, so not worth using an STM.Map.
@@ -261,7 +265,11 @@ data ShakeExtras = ShakeExtras
         -> String
         -> [DelayedAction ()]
         -> IO ()
+#if MIN_VERSION_ghc(9,3,0)
+    ,ideNc :: NameCache
+#else
     ,ideNc :: IORef NameCache
+#endif
     -- | A mapping of module name to known target (or candidate targets, if missing)
     ,knownTargetsVar :: TVar (Hashed KnownTargets)
     -- | A mapping of exported identifiers for local modules. Updated on kick
@@ -552,6 +560,7 @@ seqValue val = case val of
 shakeOpen :: Recorder (WithPriority Log)
           -> Maybe (LSP.LanguageContextEnv Config)
           -> Config
+          -> IdePlugins IdeState
           -> Logger
           -> Debouncer NormalizedUri
           -> Maybe FilePath
@@ -563,15 +572,19 @@ shakeOpen :: Recorder (WithPriority Log)
           -> Monitoring
           -> Rules ()
           -> IO IdeState
-shakeOpen recorder lspEnv defaultConfig logger debouncer
+shakeOpen recorder lspEnv defaultConfig idePlugins logger debouncer
   shakeProfileDir (IdeReportProgress reportProgress)
   ideTesting@(IdeTesting testing)
   withHieDb indexQueue opts monitoring rules = mdo
     let log :: Logger.Priority -> Log -> IO ()
         log = logWith recorder
 
+#if MIN_VERSION_ghc(9,3,0)
+    ideNc <- initNameCache 'r' knownKeyNames
+#else
     us <- mkSplitUniqSupply 'r'
     ideNc <- newIORef (initNameCache us knownKeyNames)
+#endif
     shakeExtras <- do
         globals <- newTVarIO HMap.empty
         state <- STM.newIO
@@ -616,12 +629,9 @@ shakeOpen recorder lspEnv defaultConfig logger debouncer
     shakeDatabaseProfile <- shakeDatabaseProfileIO shakeProfileDir
 
     IdeOptions
-        { optOTMemoryProfiling = IdeOTMemoryProfiling otProfilingEnabled
-        , optProgressStyle
+        { optProgressStyle
         , optCheckParents
         } <- getIdeOptionsIO shakeExtras
-
-    startProfilingTelemetry otProfilingEnabled logger $ state shakeExtras
 
     checkParents <- optCheckParents
 
@@ -957,8 +967,14 @@ runIdeAction _herald s i = runReaderT (runIdeActionT i) s
 askShake :: IdeAction ShakeExtras
 askShake = ask
 
+
+#if MIN_VERSION_ghc(9,3,0)
+mkUpdater :: NameCache -> NameCacheUpdater
+mkUpdater = id
+#else
 mkUpdater :: IORef NameCache -> NameCacheUpdater
 mkUpdater ref = NCU (upNameCache ref)
+#endif
 
 -- | A (maybe) stale result now, and an up to date one later
 data FastResult a = FastResult { stale :: Maybe (a,PositionMapping), uptoDate :: IO (Maybe a)  }

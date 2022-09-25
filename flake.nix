@@ -19,13 +19,16 @@
       flake = false;
     };
 
-    # List of hackage dependencies
-    lsp = {
-      url = "https://hackage.haskell.org/package/lsp-1.5.0.0/lsp-1.5.0.0.tar.gz";
+    # cabal hashes contains all the version for different haskell packages, to update:
+    # nix flake lock --update-input all-cabal-hashes-unpacked
+    all-cabal-hashes-unpacked = {
+      url = "github:commercialhaskell/all-cabal-hashes/current-hackage";
       flake = false;
     };
-    lsp-types = {
-      url = "https://hackage.haskell.org/package/lsp-types-1.5.0.0/lsp-types-1.5.0.0.tar.gz";
+
+    # List of hackage dependencies
+    lsp = {
+      url = "github:haskell/lsp/b0f8596887088b8ab65fc1015c773f45b47234ae";
       flake = false;
     };
     lsp-test = {
@@ -85,7 +88,7 @@
       flake = false;
     };
     hie-bios = {
-      url = "https://hackage.haskell.org/package/hie-bios-0.9.1/hie-bios-0.9.1.tar.gz";
+      url = "https://hackage.haskell.org/package/hie-bios-0.11.0/hie-bios-0.11.0.tar.gz";
       flake = false;
     };
     myst-parser = {
@@ -100,7 +103,7 @@
     poetry2nix.url = "github:nix-community/poetry2nix/master";
   };
   outputs =
-    inputs@{ self, nixpkgs, flake-compat, flake-utils, gitignore, ... }:
+    inputs@{ self, nixpkgs, flake-compat, flake-utils, gitignore, all-cabal-hashes-unpacked, ... }:
     {
       overlays.default = final: prev:
         with prev;
@@ -138,11 +141,13 @@
           sourceDirs = {
             haskell-language-server = ./.;
             ghcide = ./ghcide;
+            ghcide-bench = ./ghcide-bench;
             hls-graph = ./hls-graph;
             shake-bench = ./shake-bench;
             hie-compat = ./hie-compat;
             hls-plugin-api = ./hls-plugin-api;
             hls-test-utils = ./hls-test-utils;
+            ghcide-test-utils = ./ghcide/test;
           } // pluginSourceDirs;
 
           # Tweak our packages
@@ -154,8 +159,8 @@
               # GHCIDE requires hie-bios ^>=0.9.1
               hie-bios = hself.callCabal2nix "hie-bios" inputs.hie-bios {};
 
-              lsp = hsuper.callCabal2nix "lsp" inputs.lsp {};
-              lsp-types = hsuper.callCabal2nix "lsp-types" inputs.lsp-types {};
+              lsp = hsuper.callCabal2nix "lsp" "${inputs.lsp}/lsp" {};
+              lsp-types = hsuper.callCabal2nix "lsp-types" "${inputs.lsp}/lsp-types" {};
               lsp-test = hsuper.callCabal2nix "lsp-test" inputs.lsp-test {};
 
               implicit-hie-cradle = hself.callCabal2nix "implicit-hie-cradle" inputs.implicit-hie-cradle {};
@@ -183,6 +188,14 @@
 
         in {
           inherit hlsSources;
+
+          all-cabal-hashes = prev.runCommand "all-cabal-hashes.tar.gz"
+            { }
+            ''
+              cd ${all-cabal-hashes-unpacked}
+              cd ..
+              tar czf $out $(basename ${all-cabal-hashes-unpacked})
+            '';
 
           # Haskell packages extended with our packages
           hlsHpkgs = compiler: extended haskell.packages.${compiler};
@@ -214,6 +227,7 @@
 
         ghc902Config = (import ./configuration-ghc-90.nix) { inherit pkgs inputs; };
         ghc924Config = (import ./configuration-ghc-92.nix) { inherit pkgs inputs; };
+        ghc942Config = (import ./configuration-ghc-94.nix) { inherit pkgs inputs; };
 
         # GHC versions
         # While HLS still works fine with 8.10 GHCs, we only support the versions that are cached
@@ -223,11 +237,13 @@
           cases = {
             ghc902 = ghc902Config.tweakHpkgs (pkgs.hlsHpkgs "ghc902");
             ghc924 = ghc924Config.tweakHpkgs (pkgs.hlsHpkgs "ghc924");
+            ghc942 = ghc942Config.tweakHpkgs (pkgs.hlsHpkgs "ghc942");
           };
           in { default = cases."${ghcVersion}"; } // cases;
 
         ghc902 = supportedGHCs.ghc902;
         ghc924 = supportedGHCs.ghc924;
+        ghc942 = supportedGHCs.ghc942;
         ghcDefault = supportedGHCs.default;
 
         # For markdown support
@@ -277,16 +293,16 @@
             hpkgs.ghc
             pkgs.cabal-install
             # @guibou: I'm not sure hie-bios is needed
-            ghcDefault.hie-bios
+            pkgs.haskellPackages.hie-bios
             # Dependencies needed to build some parts of hackage
             gmp zlib ncurses
             # Changelog tooling
-            (gen-hls-changelogs ghcDefault)
+            (gen-hls-changelogs pkgs.haskellPackages)
             # For the documentation
             pythonWithPackages
             # @guibou: I'm not sure this is needed.
             hlint
-            ghcDefault.opentelemetry-extra
+            pkgs.haskellPackages.opentelemetry-extra
             capstone tracy
             # ormolu
             # stylish-haskell
@@ -340,7 +356,7 @@
             src = null;
           };
         # Create a hls executable
-        # Copied from https://github.com/NixOS/nixpkgs/blob/210784b7c8f3d926b7db73bdad085f4dc5d79418/pkgs/development/tools/haskell/haskell-language-server/withWrapper.nix#L16
+        # Copied from https://github.com/NixOS/nixpkgs/blob/210784b7c8f3d926b7db73bdad085f4dc5d79428/pkgs/development/tools/haskell/haskell-language-server/withWrapper.nix#L16
         mkExe = hpkgs:
           with pkgs.haskell.lib;
           (enableSharedExecutables (overrideCabal hpkgs.haskell-language-server
@@ -360,6 +376,7 @@
           haskell-language-server-dev = mkDevShell ghcDefault "cabal.project";
           haskell-language-server-902-dev = mkDevShell ghc902 "cabal.project";
           haskell-language-server-924-dev = mkDevShell ghc924 "cabal.project";
+          haskell-language-server-942-dev = mkDevShell ghc942 "cabal.project";
         };
 
         # Developement shell, haskell packages are also provided by nix
@@ -367,12 +384,14 @@
           haskell-language-server-dev-nix = mkDevShellWithNixDeps ghcDefault "cabal.project";
           haskell-language-server-902-dev-nix = mkDevShellWithNixDeps ghc902 "cabal.project";
           haskell-language-server-924-dev-nix = mkDevShellWithNixDeps ghc924 "cabal.project";
+          haskell-language-server-942-dev-nix = mkDevShellWithNixDeps ghc942 "cabal.project";
         };
 
         allPackages = {
           haskell-language-server = mkExe ghcDefault;
           haskell-language-server-902 = mkExe ghc902;
           haskell-language-server-924 = mkExe ghc924;
+          haskell-language-server-942 = mkExe ghc942;
         };
 
         devShells = simpleDevShells // nixDevShells // {

@@ -29,6 +29,7 @@ import qualified Data.Map                              as M
 import           Data.Maybe
 import           Data.Mod.Word
 import qualified Data.Text                             as T
+import           Development.IDE                       (Recorder, WithPriority)
 import           Development.IDE.Core.PositionMapping
 import           Development.IDE.Core.RuleTypes
 import           Development.IDE.Core.Service
@@ -39,6 +40,8 @@ import           Development.IDE.GHC.Compat.Parser
 import           Development.IDE.GHC.Compat.Units
 import           Development.IDE.GHC.Error
 import           Development.IDE.GHC.ExactPrint
+import qualified Development.IDE.GHC.ExactPrint        as E
+import           Development.IDE.Plugin.CodeAction
 import           Development.IDE.Spans.AtPoint
 import           Development.IDE.Types.Location
 import           HieDb.Query
@@ -50,8 +53,8 @@ import           Language.LSP.Types
 
 instance Hashable (Mod a) where hash n = hash (unMod n)
 
-descriptor :: PluginId -> PluginDescriptor IdeState
-descriptor pluginId = (defaultPluginDescriptor pluginId)
+descriptor :: Recorder (WithPriority E.Log) -> PluginId -> PluginDescriptor IdeState
+descriptor recorder pluginId = mkExactprintPluginDescriptor recorder $ (defaultPluginDescriptor pluginId)
     { pluginHandlers = mkPluginHandler STextDocumentRename renameProvider
     , pluginConfigDescriptor = defaultConfigDescriptor
         { configCustomConfig = mkCustomConfig properties }

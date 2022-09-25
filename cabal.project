@@ -4,6 +4,8 @@ packages:
          ./shake-bench
          ./hls-graph
          ./ghcide
+         ./ghcide-bench
+         ./ghcide/test
          ./hls-plugin-api
          ./hls-test-utils
          ./plugins/hls-tactics-plugin
@@ -31,6 +33,7 @@ packages:
          ./plugins/hls-stan-plugin
          ./plugins/hls-gadt-plugin
          ./plugins/hls-explicit-fixity-plugin
+         ./plugins/hls-refactor-plugin
 
 -- Standard location for temporary packages needed for particular environments
 -- For example it is used in the project gitlab mirror to help in the MAcOS M1 build script
@@ -45,9 +48,13 @@ package *
 
 write-ghc-environment-files: never
 
-index-state: 2022-08-09T13:13:41Z
+index-state: 2022-09-14T16:53:13Z
 
 constraints:
+  -- For GHC 9.4, older versions of entropy fail to build on Windows
+  entropy >= 0.4.1.10,
+  -- For GHC 9.4
+  basement >= 0.0.15,
   hyphenation +embed,
   -- remove this when hlint sets ghc-lib to true by default
   -- https://github.com/ndmitchell/hlint/issues/1376
@@ -58,15 +65,37 @@ constraints:
 -- This is benign and won't affect our ability to release to Hackage,
 -- because we only depend on `ekg-json` when a non-default flag
 -- is turned on.
+-- DELETE MARKER FOR CI
+-- centos7 has an old version of git which cabal doesn't
+-- support. We delete these lines in gitlab ci to workaround
+-- this issue, as this is not necessary to build our binaries.
 source-repository-package
   type:git
   location: https://github.com/pepeiborra/ekg-json
   tag: 7a0af7a8fd38045fd15fb13445bdcc7085325460
   -- https://github.com/tibbe/ekg-json/pull/12
+-- END DELETE
 
 allow-newer:
-  -- ghc-9.2
-  ----------
-  hiedb:base,
-
-  ekg-wai:time
+  -- ghc-9.4
+  Chart-diagrams:lens,
+  Chart:lens,
+  co-log-core:base,
+  constraints-extras:base,
+  constraints-extras:template-haskell,
+  dependent-sum:some,
+  diagrams-contrib:base,
+  diagrams-contrib:lens,
+  diagrams-postscript:base,
+  diagrams-postscript:lens,
+  diagrams-svg:base,
+  diagrams-svg:lens,
+  ekg-json:base,
+  ghc-paths:Cabal,
+  haddock-library:base,
+  monoid-extras:base,
+  monoid-subclasses:vector,
+  svg-builder:base,
+  uuid:time,
+  vector-space:base,
+  ekg-wai:time,
